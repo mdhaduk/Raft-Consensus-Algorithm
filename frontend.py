@@ -11,6 +11,7 @@ class FrontEndServicer(raft_pb2_grpc.FrontEndServicer):
     def __init__(self):
         self.processes = {}
         self.config = self._load_config()
+        self.cached_server = None 
 
     def _load_config(self):
         """Load configuration from config.ini"""
@@ -43,6 +44,10 @@ class FrontEndServicer(raft_pb2_grpc.FrontEndServicer):
 
     def find_available_server(self):
         """Find first available server from active servers list"""
+        # try cached server first
+        if self.cached_server is not None and self.ping_server(self.cached_server):
+            return self.cached_server
+
         active_servers = self.get_active_servers_from_config()
         for server_id in active_servers:
             # Check if server process exists and is running
