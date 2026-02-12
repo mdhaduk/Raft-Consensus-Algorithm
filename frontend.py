@@ -19,6 +19,38 @@ class FrontEndServicer(raft_pb2_grpc.FrontEndServicer):
         config.read('config.ini')
         return config
 
+    def get_server_state(self, server_id):
+        """Get state of a server by calling GetState RPC
+        Returns: (success, term, is_leader)
+        """
+        try:
+            base_port = int(self.config.get('Servers', 'base_port', fallback='9001'))
+            addr = f"localhost:{base_port + server_id}"
+            channel = grpc.insecure_channel(addr)
+            stub = raft_pb2_grpc.KeyValueStoreStub(channel)
+
+            response = stub.GetState(raft_pb2.Empty(), timeout=2)
+            channel.close()
+            return True, response.term, response.isLeader
+        except:
+            return False, None, None
+    
+    def find_leader_server(self):
+        """Find current leader by checking GetState on all servers"""
+        active_servers = self.get_active_servers_from_config()
+        
+        for server_id in active_servers:
+            try:
+                #get_server_state should call KeyValueStore via stub and return (success, term, is_leader)
+                success, term, is_leader = self.get_server_state(server_id)
+                if success and is_leader:
+                    return server_id
+            except:
+                continue
+        
+        # No leader found, return any available server
+        return self.find_available_server()
+
     def get_active_servers_from_config(self):
         """Get list of active server IDs from config.ini"""
         try:
@@ -132,7 +164,7 @@ class FrontEndServicer(raft_pb2_grpc.FrontEndServicer):
         Input: GetKey with .key, .clientId, .requestId
         Output: Reply with .wrongLeader, .error, .value
         """
-        server_id = self.find_available_server()
+        server_id = self.find_leader_server()
         if server_id is None:
             return raft_pb2.Reply(wrongLeader=True, error="No servers available")
 
@@ -148,7 +180,7 @@ class FrontEndServicer(raft_pb2_grpc.FrontEndServicer):
         Input: KeyValue with .key, .value, .clientId, .requestId
         Output: Reply with .wrongLeader, .error
         """
-        server_id = self.find_available_server()
+        server_id = self.find_leader_server()
         if server_id is None:
             return raft_pb2.Reply(wrongLeader=True, error="No servers available")
 

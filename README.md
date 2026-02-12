@@ -24,3 +24,20 @@ Assignment Two
 3. Modified server to:
 - Have server_id, lock, and key-value store as member vars
 - implement get and store operations with thread saftey
+
+
+Assignment Three
+
+1. Updated raft.proto to add Raft RPCs: AppendEntries, RequestVote, and supporting message types (LogEntry, State, etc.)
+2. Modified server to:
+- Load peer addresses from config.ini on startup
+- Maintain Raft state: currentTerm, votedFor, role (follower/candidate/leader), leaderId
+- Randomized election timeout (150-300ms) using threading.Timer
+- start_election: increment term, vote for self, send RequestVote RPCs to all peers concurrently via threads
+- become_leader: on receiving majority votes, transition to leader and begin sending heartbeats
+- send_heartbeats: periodic AppendEntries (75ms interval) to all peers to maintain leadership
+- AppendEntries handler: reset election timer, step down if valid leader exists, reject stale terms
+- RequestVote handler: grant vote if candidate term >= current and haven't voted for someone else this term
+3. Modified frontend to:
+- find_leader_server: query GetState on all active servers to find the leader
+- Route Get/Put requests to leader instead of any available server
