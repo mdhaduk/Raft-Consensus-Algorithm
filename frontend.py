@@ -11,7 +11,7 @@ class FrontEndServicer(raft_pb2_grpc.FrontEndServicer):
     def __init__(self):
         self.processes = {}
         self.config = self._load_config()
-        self.cached_server = None 
+        self.cached_leader = None 
 
     def _load_config(self):
         """Load configuration from config.ini"""
@@ -35,15 +35,21 @@ class FrontEndServicer(raft_pb2_grpc.FrontEndServicer):
         except:
             return False, None, None
     
-    def find_leader_server(self):
+    def find_leader_server(self): 
         """Find current leader by checking GetState on all servers"""
+        # try cached leader first
+        if self.cached_leader is not None:
+            success, term, is_leader = self.get_server_state(self.cached_leader)
+            if success and is_leader:
+                return self.cached_leader
+
         active_servers = self.get_active_servers_from_config()
-        
         for server_id in active_servers:
             try:
                 #get_server_state should call KeyValueStore via stub and return (success, term, is_leader)
                 success, term, is_leader = self.get_server_state(server_id)
                 if success and is_leader:
+                    self.cached_leader = server_id
                     return server_id
             except:
                 continue
@@ -76,10 +82,6 @@ class FrontEndServicer(raft_pb2_grpc.FrontEndServicer):
 
     def find_available_server(self):
         """Find first available server from active servers list"""
-        # try cached server first
-        if self.cached_server is not None and self.ping_server(self.cached_server):
-            return self.cached_server
-
         active_servers = self.get_active_servers_from_config()
         for server_id in active_servers:
             # Check if server process exists and is running
