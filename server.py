@@ -203,7 +203,6 @@ class KeyValueStoreServicer(raft_pb2_grpc.KeyValueStoreServicer):
                 target=self._replicate_to_peer,
                 args=(peer_id, addr)
             )
-            t.daemon = True
             t.start()
 
     def _replicate_to_peer(self, peer_id, addr):
@@ -212,8 +211,10 @@ class KeyValueStoreServicer(raft_pb2_grpc.KeyValueStoreServicer):
             stub = raft_pb2_grpc.KeyValueStoreStub(channel)
             while True:
                 with self.state_lock:
+                    #need this because leader might step down mid replication
                     if self.role != "leader":
                         return
+
                     ni = self.next_index[peer_id]
                     prev_index = ni - 1
                     prev_term = self.log[prev_index].term if prev_index > 0 else 0
@@ -314,7 +315,7 @@ class KeyValueStoreServicer(raft_pb2_grpc.KeyValueStoreServicer):
                 self.heartbeat_timer.cancel()
             self.reset_election_timer()
 
-            # Check log consistency
+            # Check log consistency, if this returns false, leader decrements nextIndex and retries
             if request.prevLogIndex > 0:
                 if (request.prevLogIndex >= len(self.log) or
                         self.log[request.prevLogIndex].term != request.prevLogTerm):
@@ -323,15 +324,12 @@ class KeyValueStoreServicer(raft_pb2_grpc.KeyValueStoreServicer):
                         success=False
                     )
 
-            # Append new entries, removing conflicts
-            for i, entry in enumerate(request.entries):
-                log_index = request.prevLogIndex + i + 1
+            # Truncate once, then append any new entries (if exists)
+            log_index = request.prevLogIndex + 1
+            if request.entries:
                 if log_index < len(self.log):
-                    if self.log[log_index].term != entry.term:
-                        self.log = self.log[:log_index]
-                        self.log.append(entry)
-                else:
-                    self.log.append(entry)
+                    self.log = self.log[:log_index]
+                self.log.extend(request.entries)
 
             # Update commit index
             if request.leaderCommit > self.commitIndex:
