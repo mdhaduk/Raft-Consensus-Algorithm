@@ -1,22 +1,24 @@
-import atexit
-import grpc
-from concurrent import futures
+import configparser
 import subprocess
 import sys
-import configparser
+from concurrent import futures
+
+import grpc
+
 import raft_pb2
 import raft_pb2_grpc
+
 
 class FrontEndServicer(raft_pb2_grpc.FrontEndServicer):
     def __init__(self):
         self.processes = {}
         self.config = self._load_config()
-        self.cached_leader = None 
+        self.cached_leader = None
 
     def _load_config(self):
         """Load configuration from config.ini"""
         config = configparser.ConfigParser()
-        config.read('config.ini')
+        config.read("config.ini")
         return config
 
     def get_server_state(self, server_id):
@@ -24,7 +26,7 @@ class FrontEndServicer(raft_pb2_grpc.FrontEndServicer):
         Returns: (success, term, is_leader)
         """
         try:
-            base_port = int(self.config.get('Servers', 'base_port', fallback='9001'))
+            base_port = int(self.config.get("Servers", "base_port", fallback="9001"))
             addr = f"localhost:{base_port + server_id}"
             channel = grpc.insecure_channel(addr)
             stub = raft_pb2_grpc.KeyValueStoreStub(channel)
@@ -34,8 +36,8 @@ class FrontEndServicer(raft_pb2_grpc.FrontEndServicer):
             return True, response.term, response.isLeader
         except:
             return False, None, None
-    
-    def find_leader_server(self): 
+
+    def find_leader_server(self):
         """Find current leader by checking GetState on all servers"""
         # try cached leader first
         if self.cached_leader is not None:
@@ -45,23 +47,24 @@ class FrontEndServicer(raft_pb2_grpc.FrontEndServicer):
 
         active_servers = self.get_active_servers_from_config()
         for server_id in active_servers:
-            try:
-                #get_server_state should call KeyValueStore via stub and return (success, term, is_leader)
-                success, term, is_leader = self.get_server_state(server_id)
-                if success and is_leader:
-                    self.cached_leader = server_id
-                    return server_id
-            except:
-                continue
-        
+            if server_id != self.cached_leader:
+                try:
+                    # get_server_state should call KeyValueStore via stub and return (success, term, is_leader)
+                    success, term, is_leader = self.get_server_state(server_id)
+                    if success and is_leader:
+                        self.cached_leader = server_id
+                        return server_id
+                except:
+                    continue
+
         # No leader found, return any available server
         return self.find_available_server()
 
     def get_active_servers_from_config(self):
         """Get list of active server IDs from config.ini"""
         try:
-            active_str = self.config.get('Servers', 'active')
-            active_servers = [int(x.strip()) for x in active_str.split(',')]
+            active_str = self.config.get("Servers", "active")
+            active_servers = [int(x.strip()) for x in active_str.split(",")]
             return active_servers
         except:
             return []
@@ -69,7 +72,7 @@ class FrontEndServicer(raft_pb2_grpc.FrontEndServicer):
     def ping_server(self, server_id):
         """Check if a server is responsive by pinging it"""
         try:
-            base_port = int(self.config.get('Servers', 'base_port', fallback='9001'))
+            base_port = int(self.config.get("Servers", "base_port", fallback="9001"))
             addr = f"localhost:{base_port + server_id}"
             channel = grpc.insecure_channel(addr)
             stub = raft_pb2_grpc.KeyValueStoreStub(channel)
@@ -97,7 +100,7 @@ class FrontEndServicer(raft_pb2_grpc.FrontEndServicer):
         Returns: (success, value)
         """
         try:
-            base_port = int(self.config.get('Servers', 'base_port', fallback='9001'))
+            base_port = int(self.config.get("Servers", "base_port", fallback="9001"))
             addr = f"localhost:{base_port + server_id}"
             channel = grpc.insecure_channel(addr)
             stub = raft_pb2_grpc.KeyValueStoreStub(channel)
@@ -116,7 +119,7 @@ class FrontEndServicer(raft_pb2_grpc.FrontEndServicer):
         Returns: (success, error_message)
         """
         try:
-            base_port = int(self.config.get('Servers', 'base_port', fallback='9001'))
+            base_port = int(self.config.get("Servers", "base_port", fallback="9001"))
             addr = f"localhost:{base_port + server_id}"
             channel = grpc.insecure_channel(addr)
             stub = raft_pb2_grpc.KeyValueStoreStub(channel)
@@ -135,8 +138,8 @@ class FrontEndServicer(raft_pb2_grpc.FrontEndServicer):
 
     def _start_server(self, server_id):
         proc = self.processes.get(server_id)
-        
-        #pre condition: if server id already exists AND is running
+
+        # pre condition: if server id already exists AND is running
         if proc is not None and proc.poll() is None:
             return True, ""
 
@@ -160,7 +163,7 @@ class FrontEndServicer(raft_pb2_grpc.FrontEndServicer):
         if not ok:
             return raft_pb2.Reply(wrongLeader=False, error=error)
         return raft_pb2.Reply(wrongLeader=False)
-    
+
     def Get(self, request, context):
         """Handle client Get request
         Input: GetKey with .key, .clientId, .requestId
@@ -187,7 +190,9 @@ class FrontEndServicer(raft_pb2_grpc.FrontEndServicer):
             return raft_pb2.Reply(wrongLeader=True, error="No servers available")
 
         # Forward to server
-        success, error = self.forward_put_to_server(server_id, request.key, request.value)
+        success, error = self.forward_put_to_server(
+            server_id, request.key, request.value
+        )
         if success:
             return raft_pb2.Reply(wrongLeader=False)
         else:
@@ -198,12 +203,16 @@ class FrontEndServicer(raft_pb2_grpc.FrontEndServicer):
             if proc.poll() is None:
                 proc.terminate()
 
+
 def serve():
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10)) #concurrency, arbitrary # of threads
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=10)
+    )  # concurrency, arbitrary # of threads
     raft_pb2_grpc.add_FrontEndServicer_to_server(FrontEndServicer(), server)
     server.add_insecure_port("[::]:8001")
     server.start()
     server.wait_for_termination()
+
 
 if __name__ == "__main__":
     serve()
