@@ -1,4 +1,6 @@
 import configparser
+import json
+import os
 import random
 import sys
 import threading
@@ -26,11 +28,15 @@ class KeyValueStoreServicer(raft_pb2_grpc.KeyValueStoreServicer):
         self.role = "follower"  # "follower", "candidate", "leader"
         self.leaderId = None
         self.votes_received = 0
+        self.state_path = ""  # set in load_peers()
 
         # Load peer info from config.ini
         self.peers = {}
         self._load_peers()
         self.total_servers = len(self.peers) + 1  # peers + self
+
+        # reload previous state from disk if available
+        self._reload_state()
 
         # Timers
         self.election_timer = None
@@ -44,12 +50,70 @@ class KeyValueStoreServicer(raft_pb2_grpc.KeyValueStoreServicer):
     def _load_peers(self):
         config = configparser.ConfigParser()
         config.read("config.ini")
+        self.state_path = config.get(
+            "Servers", "persistent_state_path", fallback="state_file"
+        )
         base_port = int(config.get("Servers", "base_port", fallback="9001"))
         active_str = config.get("Servers", "active", fallback="")
         active_ids = [int(x.strip()) for x in active_str.split(",") if x.strip()]
         for peer_id in active_ids:
             if peer_id != self.server_id:
                 self.peers[peer_id] = f"localhost:{base_port + peer_id}"
+
+    def _write_state_to_disk(self):
+        with self.state_lock:
+            os.makedirs(self.state_path, exist_ok=True)
+            file_path = f"{self.state_path}/server_{self.server_id}.json"
+            state = {
+                "currentTerm": self.currentTerm,
+                "votedFor": self.votedFor,
+                "log": [
+                    {
+                        "term": e.term,
+                        "key": e.key,
+                        "value": e.value,
+                        "clientId": e.clientId,
+                        "requestId": e.requestId,
+                    }
+                    for e in self.log[1:]  # skip None at index 0
+                ],
+            }
+            temp_file = f"{file_path}.tmp"
+
+            with open(temp_file, "w") as f:
+                json.dump(state, f)
+                f.flush()
+                os.fsync(f.fileno())  # Force to disk
+            # for debugging
+            # temp_file1 = f"{file_path}.tmp1"
+            # with open(temp_file1, "w") as f:
+            #     json.dump(state, f)
+            #     f.flush()
+            #     os.fsync(f.fileno())  # Force to disk
+            os.rename(temp_file, file_path)  # Atomic operation
+
+    def _reload_state(self):
+        with self.state_lock:
+            file_path = f"{self.state_path}/server_{self.server_id}.json"
+            if not os.path.exists(file_path):
+                return
+            try:
+                with open(file_path, "r") as f:
+                    state = json.load(f)
+                    self.currentTerm = state.get("currentTerm", 0)
+                    self.votedFor = state.get("votedFor", None)
+                    self.log = [None] + [
+                        raft_pb2.LogEntry(
+                            term=e["term"],
+                            key=e["key"],
+                            value=e["value"],
+                            clientId=e["clientId"],
+                            requestId=e["requestId"],
+                        )
+                        for e in state.get("log", [])
+                    ]
+            except Exception:
+                pass
 
     def ping(self, request, context):
         return raft_pb2.GenericResponse(success=True)
@@ -71,6 +135,7 @@ class KeyValueStoreServicer(raft_pb2_grpc.KeyValueStoreServicer):
             self.votedFor = self.server_id
             self.votes_received = 1  # self-vote
             election_term = self.currentTerm
+            self._write_state_to_disk()
             self.reset_election_timer()
 
         for peer_id, addr in self.peers.items():
@@ -126,13 +191,22 @@ class KeyValueStoreServicer(raft_pb2_grpc.KeyValueStoreServicer):
         self.match_index = {pid: 0 for pid in self.peers}
         if self.election_timer:
             self.election_timer.cancel()
+
+        # append a no-op to force commit
+        no_op = raft_pb2.LogEntry(
+            term=self.currentTerm,
+            key="",
+            value="",
+            clientId=0,
+            requestId=0,
+        )
+        self.log.append(no_op)
         self.send_heartbeats()
 
     def send_heartbeats(self):
         with self.state_lock:
             if self.role != "leader":
                 return
-            current_term = self.currentTerm
 
         for peer_id, addr in self.peers.items():
             t = threading.Thread(target=self._replicate_to_peer, args=(peer_id, addr))
@@ -171,6 +245,8 @@ class KeyValueStoreServicer(raft_pb2_grpc.KeyValueStoreServicer):
                 requestId=request.requestId,
             )
             self.log.append(entry)
+            self._write_state_to_disk()  # persist state in disk
+
             self.replicate_to_followers()
 
             return raft_pb2.GenericResponse(success=True)
@@ -217,7 +293,6 @@ class KeyValueStoreServicer(raft_pb2_grpc.KeyValueStoreServicer):
                     else:
                         # Log inconsistency: decrement and retry
                         self.next_index[peer_id] = max(1, self.next_index[peer_id] - 1)
-
         except:
             pass
 
@@ -306,6 +381,8 @@ class KeyValueStoreServicer(raft_pb2_grpc.KeyValueStoreServicer):
                 if log_index < len(self.log):
                     self.log = self.log[:log_index]
                 self.log.extend(request.entries)
+
+            self._write_state_to_disk()  # persist state in disk
 
             # Update commit index
             if request.leaderCommit > self.commitIndex:
